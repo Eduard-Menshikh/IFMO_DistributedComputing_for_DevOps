@@ -1,2 +1,2 @@
-[servers]
+[hosts]
 158.160.138.185 ansible_user=dev ansible_ssh_pass=P@ssw0rd
