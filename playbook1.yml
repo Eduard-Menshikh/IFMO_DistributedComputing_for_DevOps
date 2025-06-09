@@ -47,56 +47,17 @@
         state: started
         enabled: yes
 
-    - name: Create Docker network for proxy
-      docker_network:
-        name: nginx-proxy
-        state: present
-
-    - name: Start nginx-proxy container
-      docker_container:
-        name: nginx-proxy
-        image: jwilder/nginx-proxy
-        ports:
-          - "80:80"
-          - "443:443"
-        volumes:
-          - /var/run/docker.sock:/tmp/docker.sock:ro
-          - /etc/nginx/certs:/etc/nginx/certs:ro
-          - /etc/nginx/vhost.d:/etc/nginx/vhost.d
-          - /usr/share/nginx/html:/usr/share/nginx/html
-        networks:
-          - name: nginx-proxy
-        restart_policy: always
-        state: started
-
-    - name: Start Let's Encrypt companion
-      docker_container:
-        name: nginx-proxy-le
-        image: jrcs/letsencrypt-nginx-proxy-companion
-        volumes:
-          - /var/run/docker.sock:/var/run/docker.sock:ro
-          - /etc/nginx/certs:/etc/nginx/certs
-          - /etc/nginx/vhost.d:/etc/nginx/vhost.d
-          - /usr/share/nginx/html:/usr/share/nginx/html
-        networks:
-          - name: nginx-proxy
-        restart_policy: always
-        state: started
-        env:
-          NGINX_PROXY_CONTAINER: nginx-proxy
-          DEFAULT_EMAIL: "{{ tls_owner_email }}"
-
     - name: Start MySQL container
       docker_container:
-        name: wp_db
+        name: wp_dbAdd commentMore actions
         image: mysql:latest
         env:
           MYSQL_DATABASE: "{{ wordpress_db_name }}"
           MYSQL_USER: "{{ db_user }}"
           MYSQL_PASSWORD: "{{ db_pass }}"
           MYSQL_ROOT_PASSWORD: "{{ db_root_pass }}"
-        networks:
-          - name: nginx-proxy
+        ports:
+          - "3306:3306"
         state: started
         restart_policy: always
 
@@ -109,10 +70,9 @@
           WORDPRESS_DB_NAME: "{{ wordpress_db_name }}"
           WORDPRESS_DB_USER: "{{ db_user }}"
           WORDPRESS_DB_PASSWORD: "{{ db_pass }}"
-          VIRTUAL_HOST: "{{ domain_name }}"
-          LETSENCRYPT_HOST: "{{ domain_name }}"
-          LETSENCRYPT_EMAIL: "{{ tls_owner_email }}"
-        networks:
-          - name: nginx-proxy
-        restart_policy: always
+        ports:
+          - "{{ wordpress_port }}:80"
+        links:
+          - wp_db
         state: started
+        restart_policy: always
