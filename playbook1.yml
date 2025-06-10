@@ -49,7 +49,7 @@
 
     - name: Start MySQL container
       docker_container:
-        name: wp_dbAdd commentMore actions
+        name: wp_db
         image: mysql:latest
         env:
           MYSQL_DATABASE: "{{ wordpress_db_name }}"
