@@ -4,3 +4,6 @@ wordpress_db_name: wp_db
 db_user: wp_user
 db_pass: wp_pass
 db_root_pass: root_pass
+mysql_image: mysql:8.0
+replica_user: replica
+replica_pass: replica_pass

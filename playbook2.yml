@@ -1,13 +1,203 @@
----
-- name: Home work 2
-  hosts: carrier
+- name: Deploy WordPress and DB in Docker
+  hosts: hosts
+  become: true
+  vars_files:
+    - .vars.yaml
+
   tasks:
-    - name: Display Configuration Variables
+    - name: Ensure required dependencies are installed
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Create Docker repository file
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker and plugins
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Ensure PyMySQL is installed
+      ansible.builtin.apt:
+        name: python3-pymysql
+        state: present
+        update_cache: true
+      become: true
+
+    - name: Create Docker network
+      docker_network:
+        name: wp_net
+        state: present
+
+    - name: Create Docker volume for MySQL master
+      docker_volume:
+        name: wp_db_master_data
+        state: present
+
+    - name: Create Docker volume for MySQL slave
+      docker_volume:
+        name: wp_db_slave_data
+        state: present
+
+    - name: Start MySQL master container
+      docker_container:
+        name: wp_db_master
+        image: "{{ mysql_image }}"
+        command:
+          - --binlog-do-db={{ wordpress_db_name }}
+          - --log-bin=mysql-bin
+        volumes:
+          - wp_db_master_data:/var/lib/mysql
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ db_root_pass }}"
+          MYSQL_DATABASE: "{{ wordpress_db_name }}"
+          MYSQL_USER: "{{ db_user }}"
+          MYSQL_PASSWORD: "{{ db_pass }}"
+        networks:
+          - name: wp_net
+        state: started
+        restart_policy: always
+
+    - name: Start MySQL slave container
+      docker_container:
+        name: wp_db_slave
+        image: "{{ mysql_image }}"
+        command:
+          - --relay-log=slave-relay-bin
+          - --server-id=2
+        volumes:
+          - wp_db_slave_data:/var/lib/mysql
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ db_root_pass }}"
+        networks:
+          - name: wp_net
+        state: started
+        restart_policy: always
+
+    - name: Wait for MySQL master to be ready
+      shell: docker exec wp_db_master mysqladmin ping -uroot -p{{ db_root_pass }}
+      register: mysql_ready
+      retries: 10
+      delay: 10
+      until: mysql_ready.rc == 0
+
+    - name: Wait for MySQL slave to be ready
+      shell: docker exec wp_db_slave mysqladmin ping -uroot -p{{ db_root_pass }}
+      register: mysql_ready
+      retries: 10
+      delay: 10
+      until: mysql_ready.rc == 0
+
+    - name: Receive info about master db container
+      community.docker.docker_container_info:
+        name: wp_db_master
+      register: master_info
+
+    - name: Receive info about slave db container
+      community.docker.docker_container_info:
+        name: wp_db_slave
+      register: slave_info
+
+    - name: Extract ip address of the db container
+      ansible.builtin.set_fact:
+        master_ip: "{{ master_info.container.NetworkSettings.Networks.wp_net.IPAddress }}"
+
+    - name: Extract ip address of the db2 container
+      ansible.builtin.set_fact:
+        slave_ip: "{{ slave_info.container.NetworkSettings.Networks.wp_net.IPAddress }}"
+
+    - name: Create replication user on master
+      community.mysql.mysql_user:
+        login_host: "{{ master_ip }}"
+        login_user: root
+        login_password: "{{ db_root_pass }}"
+        name: "{{ replica_user }}"
+        password: "{{ replica_pass }}"
+        priv:
+          "*.*": "REPLICATION SLAVE"
+        host: "%"
+        column_case_sensitive: true
+        state: present
+
+    - name: Reset replication on slave
+      community.mysql.mysql_replication:
+        login_host: "{{ slave_ip }}"
+        login_user: root
+        login_password: "{{ db_root_pass }}"
+        mode: resetreplicaall
+
+    - name: Change replication source
+      community.mysql.mysql_replication:
+        login_host: "{{ slave_ip }}"
+        login_user: root
+        login_password: "{{ db_root_pass }}"
+        mode: changereplication
+        primary_host: wp_db_master
+        primary_user: "{{ replica_user }}"
+        primary_password: "{{ replica_pass }}"
+
+    - name: Start replication
+      community.mysql.mysql_replication:
+        login_host: "{{ slave_ip }}"
+        login_user: root
+        login_password: "{{ db_root_pass }}"
+        mode: "startreplica"
+
+    - name: Get slave status
+      community.mysql.mysql_replication:
+        login_host: "{{ slave_ip }}"
+        login_user: root
+        login_password: "{{ db_root_pass }}"
+      register: slave_status
+
+    - name: Display slave status
       ansible.builtin.debug:
-        msg:
-          - "wordpress: {{ is_wordpress }}" # True or False
-          - "wordpress_port: {{ wordpress_port }}" # 80 or 8080 or whatewer
-          - "wordpress_db_name: {{ wordpress_db_name }}" # WP database name
-          - "db_master: {{ db_master }}" # container name
-          - "db_replica: {{ db_replica }}" # container name
-          - "db_pass: {{ db_pass }}" # root password for master and replica
+        msg: "{{ slave_status }}"
+
+    - name: Start WordPress container
+      docker_container:
+        name: wordpress
+        image: wordpress:latest
+        env:
+          WORDPRESS_DB_HOST: wp_db_master:3306
+          WORDPRESS_DB_NAME: "{{ wordpress_db_name }}"
+          WORDPRESS_DB_USER: "{{ db_user }}"
+          WORDPRESS_DB_PASSWORD: "{{ db_pass }}"
+        ports:
+          - "{{ wordpress_port }}:80"
+        networks:
+          - name: wp_net
+        state: started
+        restart_policy: always
+
